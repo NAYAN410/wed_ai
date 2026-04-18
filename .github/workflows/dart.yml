@@ -1,42 +1,173 @@
-name: iOS-ipa-build
+name: Flutter Build (APK + IPA)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ main, master ]
 
 jobs:
-  build-ios:
-    name: 🎉 1st iOS Build
-    runs-on: macos-latest
+  build-android-apk:
+    name: 🤖 Build Android APK
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - uses: subosito/flutter-action@v2
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          architecture: x64
-      - run: flutter pub get
-      
+          flutter-version: '3.x'
 
-      - run: pod repo update
-        working-directory: ios
+      - name: Install Dependencies
+        run: flutter pub get
 
-      - run: flutter build ios --release --no-codesign
+      - name: Setup Firebase for Android
+        run: |
+          echo '${{ secrets.GOOGLE_SERVICES_JSON }}' > android/app/google-services.json
+          echo "✅ Firebase config created for Android"
 
-      - run: mkdir Payload
-        working-directory: build/ios/iphoneos
+      - name: Build APK
+        run: flutter build apk --release
 
-      - run: mv Runner.app/ Payload
-        working-directory: build/ios/iphoneos
-
-      - name: Zip output
-        run: zip -qq -r -9 FlutterIpaExport.ipa Payload
-        working-directory: build/ios/iphoneos
-
-      - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@v2
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: build/ios/iphoneos/FlutterIpaExport.ipa
-          tag: v1.0
-          overwrite: true
-          body: "This is first release"
+          name: android-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 7
+
+  build-android-appbundle:
+    name: 📦 Build Android App Bundle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          flutter-version: '3.x'
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Setup Firebase for Android
+        run: |
+          echo '${{ secrets.GOOGLE_SERVICES_JSON }}' > android/app/google-services.json
+          echo "✅ Firebase config created for Android"
+
+      - name: Build App Bundle
+        run: flutter build appbundle --release
+
+      - name: Upload App Bundle Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-appbundle
+          path: build/app/outputs/bundle/release/app-release.aab
+          retention-days: 7
+
+  build-ios-ipa:
+    name: 🍎 Build iOS IPA
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          flutter-version: '3.x'
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Setup Firebase for iOS
+        run: |
+          echo '${{ secrets.GOOGLE_SERVICES_PLIST }}' > ios/Runner/GoogleService-Info.plist
+          echo "✅ Firebase config created for iOS"
+
+      - name: Install CocoaPods
+        run: |
+          cd ios
+          pod repo update
+          pod install
+
+      - name: Build iOS
+        run: flutter build ios --release --no-codesign
+
+      - name: Create IPA
+        run: |
+          cd build/ios/iphoneos
+          mkdir -p Payload
+          mv Runner.app Payload/
+          zip -r app.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: build/ios/iphoneos/app.ipa
+          retention-days: 7
+
+  create-release:
+    name: 📦 Package Release
+    runs-on: ubuntu-latest
+    needs: [build-android-apk, build-android-appbundle, build-ios-ipa]
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    steps:
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: ./release-files
+
+      - name: Download App Bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: android-appbundle
+          path: ./release-files
+
+      - name: Download IPA
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-ipa
+          path: ./release-files
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Release Build ${{ github.run_number }}
+          body: |
+            ## Flutter App Release
+            
+            **Build Information:**
+            - Build Number: ${{ github.run_number }}
+            - Commit SHA: ${{ github.sha }}
+            - Trigger: ${{ github.event_name }}
+            
+            **Generated Files:**
+            - ✅ Android APK (app-release.apk)
+            - ✅ Android App Bundle (app-release.aab)
+            - ✅ iOS IPA (app.ipa)
+            
+            **Installation:**
+            - Android: Install APK directly on device
+            - iOS: Use IPA for testing or distribution
+          draft: false
+          prerelease: false
+          files: |
+            release-files/app-release.apk
+            release-files/app-release.aab
+            release-files/app.ipa
